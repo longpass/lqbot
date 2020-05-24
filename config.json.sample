@@ -1,0 +1,10 @@
+{
+  "market": "NIM/BTC",
+  "max_spread": 0.01,
+  "demo": false,
+  "kucoin": {
+    "apiKey": "<api-key>",
+    "secret": "<api-secret>",
+    "password": "<api-password>"
+  }
+}
