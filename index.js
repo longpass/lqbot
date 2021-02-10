@@ -15,34 +15,42 @@ const demo = config.demo;
 
 (async () => {
 
-const kucoin = new ccxt.kucoin(config.kucoin);
+let exchange;
+if (config.kucoin) {
+  exchange = new ccxt.kucoin(config.kucoin);
+} else if (config.bitmax) {
+  exchange = new ccxt.bitmax(config.bitmax);
+}
 
 const db = await sqlite.open({
   filename: './lqbot.db',
   driver: sqlite3.Database
 })
 
-const openOrders = await kucoin.fetchOpenOrders(market);
-const dbOrders = await db.all('SELECT * FROM orders WHERE active = 1 ORDER BY price DESC;');
-
 const merged = {};
-for (const order of dbOrders) {
-  merged[order.id] = order;
-}
-for (const order of openOrders) {
-  if (!merged[order.id]) continue;
-  merged[order.id].exchange = order;
-}
-for (const orderId of Object.keys(merged)) {
-  const order = merged[orderId];
-  if (!order.exchange) {
-    order.status = 'removed';
-    order.lastTradeTimestamp = Date.now();
-  } else {
-    order.status = order.exchange.status;
-    order.lastTradeTimestamp = order.exchange.lastTradeTimestamp;
+
+const createMergedOrders = async () => {
+  const openOrders = await exchange.fetchOpenOrders(market);
+  const dbOrders = await db.all('SELECT * FROM orders WHERE active = 1 ORDER BY price DESC;');
+
+  for (const order of dbOrders) {
+    merged[order.id] = order;
   }
-  order.exchange = undefined;
+  for (const order of openOrders) {
+    if (!merged[order.id]) continue;
+    merged[order.id].exchange = order;
+  }
+  for (const orderId of Object.keys(merged)) {
+    const order = merged[orderId];
+    if (!order.exchange) {
+      order.status = 'removed';
+      order.lastTradeTimestamp = Date.now();
+    } else {
+      order.status = order.exchange.status;
+      order.lastTradeTimestamp = order.exchange.lastTradeTimestamp;
+    }
+    order.exchange = undefined;
+  }
 }
 
 const createOrder = async (direction, amount, price) => {
@@ -51,23 +59,41 @@ const createOrder = async (direction, amount, price) => {
   }
   try {
     if (direction == 'buy') {
-      return await kucoin.createLimitBuyOrder(market, amount, price);
+      return await exchange.createLimitBuyOrder(market, amount, price);
     } else {
-      return await kucoin.createLimitSellOrder(market, amount, price);
+      return await exchange.createLimitSellOrder(market, amount, price);
     }
   } catch (e) {
     return {status: 'failed', id: 'error', message: e.message, timestamp: Date.now()};
   }
 }
 
+const cancelOrder = async (orderId) => {
+  if (!demo) {
+    try {
+      await exchange.cancelOrder(orderId, market);
+    } catch (ignored) {}
+  }
+  await db.run('UPDATE orders SET active=0, endTime=? WHERE id=?', Date.now(), orderId);
+}
+
 
 switch (command) {
   case 'status':
+    await createMergedOrders();
     for (const orderId of Object.keys(merged)) {
       const order = merged[orderId];
       console.log(`${orderId} ${order.direction} ${order.amount} ${order.price} ${order.status}`);
     }
     break;
+  case 'cancel-all':
+  case 'cancel_all': {
+    await createMergedOrders();
+    for (const orderId of Object.keys(merged)) {
+      await cancelOrder(orderId);
+    }
+    break;
+  }
   case 'add': {
     const direction = args[1];
     const amount = args[2];
@@ -81,13 +107,11 @@ switch (command) {
   }
   case 'cancel': {
     const orderId = args[1];
-    try {
-      await kucoin.cancelOrder(orderId);
-    } catch (ignored) {}
-    await db.run('UPDATE orders SET active=0, endTime=? WHERE id=?', Date.now(), orderId);
+    cancelOrder(orderId);
     break;
   }
   case 'run': {
+    await createMergedOrders();
     for (const orderId of Object.keys(merged)) {
       const order = merged[orderId];
       if (order.status == 'removed' || order.status == 'closed' || order.status == 'cancelled') {
